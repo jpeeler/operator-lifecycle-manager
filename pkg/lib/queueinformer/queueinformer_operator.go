@@ -3,7 +3,10 @@ package queueinformer
 import (
 	"fmt"
 
+	"github.com/operator-framework/operator-lifecycle-manager/pkg/api/apis/operators/v1alpha1"
+
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/operatorclient"
+	"github.com/operator-framework/operator-lifecycle-manager/pkg/metrics"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -133,7 +136,9 @@ func (o *Operator) sync(loop *QueueInformer, key string) error {
 	if err != nil {
 		return err
 	}
-
+	if err = o.handleMetrics(loop); err != nil {
+		return err
+	}
 	if !exists {
 		// For now, we ignore the case where an object used to exist but no longer does
 		logger.Info("couldn't get from queue")
@@ -141,4 +146,35 @@ func (o *Operator) sync(loop *QueueInformer, key string) error {
 		return nil
 	}
 	return loop.syncHandler(obj)
+}
+
+func (o *Operator) handleMetrics(informer *QueueInformer) error {
+	switch informer.name {
+	case "csv":
+		cList, err := o.OpClient.ListCustomResource(v1alpha1.GroupName, v1alpha1.GroupVersion, "", v1alpha1.ClusterServiceVersionKind)
+		if err != nil {
+			return err
+		}
+		metrics.CSVCount.Set(float64(len(cList.Items)))
+	case "installplan":
+		cList, err := o.OpClient.ListCustomResource(v1alpha1.GroupName, v1alpha1.GroupVersion, "", v1alpha1.InstallPlanKind)
+		if err != nil {
+			return err
+		}
+		metrics.InstallPlanCount.Set(float64(len(cList.Items)))
+	case "subscription":
+		cList, err := o.OpClient.ListCustomResource(v1alpha1.GroupName, v1alpha1.GroupVersion, "", v1alpha1.SubscriptionKind)
+		if err != nil {
+			return err
+		}
+		metrics.SubscriptionCount.Set(float64(len(cList.Items)))
+	case "catsrc":
+		cList, err := o.OpClient.ListCustomResource(v1alpha1.GroupName, v1alpha1.GroupVersion, "", v1alpha1.CatalogSourceKind)
+		if err != nil {
+			return err
+		}
+		metrics.CatalogSourceCount.Set(float64(len(cList.Items)))
+	}
+
+	return nil
 }
