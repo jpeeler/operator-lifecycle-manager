@@ -68,6 +68,7 @@ type Operator struct {
 	catSrcQueueSet        *queueinformer.ResourceQueueSet
 	namespaceResolveQueue workqueue.RateLimitingInterface
 	reconciler            reconciler.RegistryReconcilerFactory
+	csvProvidedAPIIndexer cache.Indexer
 }
 
 // NewOperator creates a new Catalog Operator.
@@ -102,6 +103,29 @@ func NewOperator(kubeconfigPath string, logger *logrus.Logger, wakeupInterval ti
 		lister.OperatorsV1alpha1().RegisterInstallPlanLister(namespace, nsInformerFactory.Operators().V1alpha1().InstallPlans().Lister())
 	}
 
+	// Register an informer for CSVs in all namespaces and add an indexer for provided APIs
+	sharedInformerFactory := externalversions.NewSharedInformerFactory(crClient, wakeupInterval)
+	csvInformer := sharedInformerFactory.Operators().V1alpha1().ClusterServiceVersions()
+	lister.OperatorsV1alpha1().RegisterClusterServiceVersionLister(metav1.NamespaceAll, csvInformer.Lister())
+	csvInformer.Informer().AddIndexers(cache.Indexers{"providedAPIs": func(obj interface{}) ([]string, error) {
+		indicies := []string{}
+
+		csv, ok := obj.(*v1alpha1.ClusterServiceVersion)
+		if !ok {
+			return indicies, fmt.Errorf("invalid object of type: %T", obj)
+		}
+
+		for _, crdDef := range csv.Spec.CustomResourceDefinitions.Owned {
+			indicies = append(indicies, fmt.Sprintf("provided=%s/%s/%s", crdDef.Name, crdDef.Version, crdDef.Kind))
+		}
+		for _, api := range csv.Spec.APIServiceDefinitions.Owned {
+			indicies = append(indicies, fmt.Sprintf("provided=%s/%s/%s", api.Group, api.Version, api.Kind))
+		}
+
+		return indicies, nil
+	}})
+	csvProvidedAPIIndexer := csvInformer.Informer().GetIndexer()
+
 	// Create a new queueinformer-based operator.
 	queueOperator, err := queueinformer.NewOperator(kubeconfigPath, logger)
 	if err != nil {
@@ -110,13 +134,14 @@ func NewOperator(kubeconfigPath string, logger *logrus.Logger, wakeupInterval ti
 
 	// Allocate the new instance of an Operator.
 	op := &Operator{
-		Operator:       queueOperator,
-		catSrcQueueSet: queueinformer.NewEmptyResourceQueueSet(),
-		client:         crClient,
-		lister:         lister,
-		namespace:      operatorNamespace,
-		sources:        make(map[resolver.CatalogKey]resolver.SourceRef),
-		resolver:       resolver.NewOperatorsV1alpha1Resolver(lister),
+		Operator:              queueOperator,
+		catSrcQueueSet:        queueinformer.NewEmptyResourceQueueSet(),
+		client:                crClient,
+		lister:                lister,
+		namespace:             operatorNamespace,
+		sources:               make(map[resolver.CatalogKey]resolver.SourceRef),
+		resolver:              resolver.NewOperatorsV1alpha1Resolver(lister),
+		csvProvidedAPIIndexer: csvProvidedAPIIndexer,
 	}
 
 	// Create an informer for each catalog namespace
@@ -1026,6 +1051,7 @@ func (o *Operator) ExecutePlan(plan *v1alpha1.InstallPlan) error {
 	if plan.Status.Phase != v1alpha1.InstallPlanPhaseInstalling {
 		panic("attempted to install a plan that wasn't in the installing phase")
 	}
+	o.Log.Debug("JPEELER: starting")
 
 	namespace := plan.GetNamespace()
 
@@ -1038,6 +1064,7 @@ func (o *Operator) ExecutePlan(plan *v1alpha1.InstallPlan) error {
 	}
 
 	for i, step := range plan.Status.Plan {
+		o.Log.Debugf("JPEELER: looking at %v", step)
 		switch step.Status {
 		case v1alpha1.StepStatusPresent, v1alpha1.StepStatusCreated:
 			continue
@@ -1055,14 +1082,29 @@ func (o *Operator) ExecutePlan(plan *v1alpha1.InstallPlan) error {
 
 				// TODO: check that names are accepted
 				// Attempt to create the CRD.
+				o.Log.Debugf("JPEELER: crd %v", crd.Name)
 				_, err = o.OpClient.ApiextensionsV1beta1Interface().ApiextensionsV1beta1().CustomResourceDefinitions().Create(&crd)
 				if k8serrors.IsAlreadyExists(err) {
+					o.Log.Debug("CRD detected to exist")
 					currentCRD, _ := o.OpClient.ApiextensionsV1beta1Interface().ApiextensionsV1beta1().CustomResourceDefinitions().Get(crd.GetName(), metav1.GetOptions{})
-					// Compare 2 CRDs to see if it needs to be updatetd
+					// Compare 2 CRDs to see if it needs to be updated
 					if !reflect.DeepEqual(crd, *currentCRD) {
 						// Verify CRD ownership, only attempt to update if
 						// CRD has only one owner
-						if len(existingCRDOwners[currentCRD.GetName()]) == 1 {
+						searchKey := fmt.Sprintf("provided=%s/%s/%s", currentCRD.Name, currentCRD.APIVersion, currentCRD.Kind)
+						fetchedObj, exists, err := o.csvProvidedAPIIndexer.GetByKey(searchKey)
+						if !exists || err != nil {
+							return errorwrap.Wrapf(err, "could not find CSV (exists: %v) via key %v", exists, searchKey)
+						}
+						currentCSV, ok := fetchedObj.(*v1alpha1.ClusterServiceVersion)
+						if !ok {
+							return fmt.Errorf("type conversion failure on %v", fetchedObj)
+						}
+						var ownerCount int
+						ownerCount += len(currentCSV.Spec.CustomResourceDefinitions.Owned)
+						ownerCount += len(currentCSV.Spec.APIServiceDefinitions.Owned)
+
+						if ownerCount == 1 {
 							// Attempt to update CRD
 							_, err = o.OpClient.ApiextensionsV1beta1Interface().ApiextensionsV1beta1().CustomResourceDefinitions().Update(&crd)
 							if err != nil {

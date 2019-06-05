@@ -120,11 +120,13 @@ func TestTransitionInstallPlan(t *testing.T) {
 }
 
 func TestExecutePlan(t *testing.T) {
+	logrus.SetLevel(logrus.DebugLevel)
 	namespace := "ns"
 
 	tests := []struct {
 		testName string
 		in       *v1alpha1.InstallPlan
+		crd      *v1beta1.CustomResourceDefinition
 		want     []runtime.Object
 		err      error
 	}{
@@ -142,11 +144,11 @@ func TestExecutePlan(t *testing.T) {
 						Resource: v1alpha1.StepResource{
 							CatalogSource:          "catalog",
 							CatalogSourceNamespace: namespace,
-							Group:    "",
-							Version:  "v1",
-							Kind:     "Service",
-							Name:     "service",
-							Manifest: toManifest(service("service", namespace)),
+							Group:                  "",
+							Version:                "v1",
+							Kind:                   "Service",
+							Name:                   "service",
+							Manifest:               toManifest(service("service", namespace)),
 						},
 						Status: v1alpha1.StepStatusUnknown,
 					},
@@ -154,11 +156,57 @@ func TestExecutePlan(t *testing.T) {
 						Resource: v1alpha1.StepResource{
 							CatalogSource:          "catalog",
 							CatalogSourceNamespace: namespace,
-							Group:    "operators.coreos.com",
-							Version:  "v1alpha1",
-							Kind:     "ClusterServiceVersion",
-							Name:     "csv",
-							Manifest: toManifest(csv("csv", namespace, nil, nil)),
+							Group:                  "operators.coreos.com",
+							Version:                "v1alpha1",
+							Kind:                   "ClusterServiceVersion",
+							Name:                   "csv",
+							Manifest:               toManifest(csv("csv", namespace, nil, nil)),
+						},
+						Status: v1alpha1.StepStatusUnknown,
+					},
+				},
+			),
+			want: []runtime.Object{service("service", namespace), csv("csv", namespace, nil, nil)},
+			err:  nil,
+		},
+		{
+			testName: "MultipleStepsWithSingleOwner",
+			crd:      crd("owneds.crd.group.com"),
+			in: withSteps(installPlan("p", namespace, v1alpha1.InstallPlanPhaseInstalling, "csv"),
+				[]*v1alpha1.Step{
+					{
+						Resource: v1alpha1.StepResource{
+							CatalogSource:          "catalog",
+							CatalogSourceNamespace: namespace,
+							Group:                  "",
+							Version:                "v1beta1",
+							Kind:                   "CustomResourceDefinition",
+							Name:                   "owneds.crd.group.com",
+							Manifest:               toManifest(crd("owneds.crd.group.com")),
+						},
+						Status: v1alpha1.StepStatusUnknown,
+					},
+					{
+						Resource: v1alpha1.StepResource{
+							CatalogSource:          "catalog",
+							CatalogSourceNamespace: namespace,
+							Group:                  "",
+							Version:                "v1",
+							Kind:                   "Service",
+							Name:                   "service",
+							Manifest:               toManifest(service("service", namespace)),
+						},
+						Status: v1alpha1.StepStatusUnknown,
+					},
+					{
+						Resource: v1alpha1.StepResource{
+							CatalogSource:          "catalog",
+							CatalogSourceNamespace: namespace,
+							Group:                  "operators.coreos.com",
+							Version:                "v1alpha1",
+							Kind:                   "ClusterServiceVersion",
+							Name:                   "csv",
+							Manifest:               toManifest(csv("csv", namespace, nil, nil)),
 						},
 						Status: v1alpha1.StepStatusUnknown,
 					},
@@ -173,7 +221,8 @@ func TestExecutePlan(t *testing.T) {
 		t.Run(tt.testName, func(t *testing.T) {
 			stopCh := make(chan struct{})
 			defer func() { stopCh <- struct{}{} }()
-			op, err := NewFakeOperator(namespace, []string{namespace}, stopCh, withClientObjs(tt.in))
+
+			op, err := NewFakeOperator(namespace, []string{namespace}, stopCh, withClientObjs(tt.in), extObjs(tt.crd))
 			require.NoError(t, err)
 
 			err = op.ExecutePlan(tt.in)
@@ -544,7 +593,7 @@ func TestCompetingCRDOwnersExist(t *testing.T) {
 
 func fakeConfigMapData() map[string]string {
 	data := make(map[string]string)
-	yaml, err := yaml.Marshal([]v1beta1.CustomResourceDefinition{crd("fake-crd")})
+	yaml, err := yaml.Marshal([]v1beta1.CustomResourceDefinition{*crd("fake-crd")})
 	if err != nil {
 		return data
 	}
@@ -580,6 +629,12 @@ func withK8sObjs(k8sObjs ...runtime.Object) fakeOperatorOption {
 func extObjs(extObjs ...runtime.Object) fakeOperatorOption {
 	return func(config *fakeOperatorConfig) {
 		config.extObjs = extObjs
+	}
+}
+
+func withRegObjs(regObjs ...runtime.Object) fakeOperatorOption {
+	return func(config *fakeOperatorConfig) {
+		config.regObjs = regObjs
 	}
 }
 
@@ -650,7 +705,7 @@ func NewFakeOperator(namespace string, watchedNamespaces []string, stopCh <-chan
 	}
 
 	// Create the new operator
-	queueOperator, err := queueinformer.NewOperatorFromClient(opClientFake, logrus.New())
+	queueOperator, err := queueinformer.NewOperatorFromClient(opClientFake, logrus.StandardLogger())
 	op := &Operator{
 		Operator:  queueOperator,
 		client:    clientFake,
@@ -733,8 +788,8 @@ func csv(name, namespace string, owned, required []string) *v1alpha1.ClusterServ
 	}
 }
 
-func crd(name string) v1beta1.CustomResourceDefinition {
-	return v1beta1.CustomResourceDefinition{
+func crd(name string) *v1beta1.CustomResourceDefinition {
+	return &v1beta1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},

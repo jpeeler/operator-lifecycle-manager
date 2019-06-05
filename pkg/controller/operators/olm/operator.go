@@ -28,6 +28,7 @@ import (
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/certs"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/install"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/registry/resolver"
+	csvutility "github.com/operator-framework/operator-lifecycle-manager/pkg/lib/csv"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/event"
 	index "github.com/operator-framework/operator-lifecycle-manager/pkg/lib/index"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/labeler"
@@ -36,7 +37,6 @@ import (
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/ownerutil"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/queueinformer"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/metrics"
-	csvutility "github.com/operator-framework/operator-lifecycle-manager/pkg/lib/csv"
 )
 
 var (
@@ -53,20 +53,21 @@ const (
 
 type Operator struct {
 	*queueinformer.Operator
-	csvQueueSet      *queueinformer.ResourceQueueSet
-	ogQueueSet       *queueinformer.ResourceQueueSet
-	apiSvcQueue      workqueue.RateLimitingInterface
-	client           versioned.Interface
-	resolver         install.StrategyResolverInterface
-	apiReconciler    resolver.APIIntersectionReconciler
-	lister           operatorlister.OperatorLister
-	recorder         record.EventRecorder
-	copyQueueIndexer *queueinformer.QueueIndexer
-	gcQueueIndexer   *queueinformer.QueueIndexer
-	apiLabeler       labeler.Labeler
-	csvIndexers      map[string]cache.Indexer
-	csvSetGenerator	 csvutility.SetGenerator
-	csvReplaceFinder csvutility.ReplaceFinder
+	csvQueueSet           *queueinformer.ResourceQueueSet
+	ogQueueSet            *queueinformer.ResourceQueueSet
+	apiSvcQueue           workqueue.RateLimitingInterface
+	client                versioned.Interface
+	resolver              install.StrategyResolverInterface
+	apiReconciler         resolver.APIIntersectionReconciler
+	lister                operatorlister.OperatorLister
+	recorder              record.EventRecorder
+	copyQueueIndexer      *queueinformer.QueueIndexer
+	gcQueueIndexer        *queueinformer.QueueIndexer
+	apiLabeler            labeler.Labeler
+	csvIndexers           map[string]cache.Indexer
+	csvProvidedAPIIndexer cache.Indexer
+	csvSetGenerator       csvutility.SetGenerator
+	csvReplaceFinder      csvutility.ReplaceFinder
 }
 
 func NewOperator(logger *logrus.Logger, crClient versioned.Interface, opClient operatorclient.ClientInterface, strategyResolver install.StrategyResolverInterface, wakeupInterval time.Duration, namespaces []string) (*Operator, error) {
@@ -274,6 +275,28 @@ func NewOperator(logger *logrus.Logger, crClient versioned.Interface, opClient o
 		csvInformer.Informer().AddIndexers(cache.Indexers{index.MetaLabelIndexFuncKey: index.MetaLabelIndexFunc})
 		op.csvIndexers[namespace] = csvInformer.Informer().GetIndexer()
 	}
+
+	sharedInformerFactory := externalversions.NewSharedInformerFactory(crClient, wakeupInterval)
+	csvInformer := sharedInformerFactory.Operators().V1alpha1().ClusterServiceVersions()
+	op.lister.OperatorsV1alpha1().RegisterClusterServiceVersionLister(metav1.NamespaceAll, csvInformer.Lister())
+	csvInformer.Informer().AddIndexers(cache.Indexers{"providedAPIs": func(obj interface{}) ([]string, error) {
+		indicies := []string{}
+
+		csv, ok := obj.(*v1alpha1.ClusterServiceVersion)
+		if !ok {
+			return indicies, fmt.Errorf("invalid object of type: %T", obj)
+		}
+
+		for _, crd := range csv.Spec.CustomResourceDefinitions.Owned {
+			indicies = append(indicies, fmt.Sprintf("%s=%s", crd.Name, csv.GetName()))
+		}
+		for _, api := range csv.Spec.APIServiceDefinitions.Owned {
+			indicies = append(indicies, fmt.Sprintf("%s=%s", api.Group, csv.GetName()))
+		}
+
+		return indicies, nil
+	}})
+	op.csvProvidedAPIIndexer = csvInformer.Informer().GetIndexer()
 
 	// Register separate queue for copying csvs
 	csvCopyQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "csvCopy")

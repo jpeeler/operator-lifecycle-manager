@@ -25,7 +25,8 @@ all: test build
 test: clean cover.out
 
 unit:
-	go test $(MOD_FLAGS) $(SPECIFIC_UNIT_TEST) -v -race -tags=json1 -count=1 ./pkg/...
+	# JPEELER remove timeout
+	go test $(MOD_FLAGS) $(SPECIFIC_UNIT_TEST) -timeout 20s -v -race -tags=json1 -count=1 ./pkg/...
 
 schema-check:
 
