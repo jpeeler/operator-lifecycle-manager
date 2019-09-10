@@ -212,6 +212,8 @@ const (
 	CSVPhaseSucceeded ClusterServiceVersionPhase = "Succeeded"
 	// CSVPhaseFailed means that the install strategy could not be successfully completed.
 	CSVPhaseFailed ClusterServiceVersionPhase = "Failed"
+	// CSVPhaseFailedNoRetry means that the install strategy could not be successfully completed and won't retry unless a cluster change warrants it.
+	CSVPhaseFailedNoRetry ClusterServiceVersionPhase = "Failed"
 	// CSVPhaseUnknown means that for some reason the state of the csv could not be obtained.
 	CSVPhaseUnknown ClusterServiceVersionPhase = "Unknown"
 	// CSVPhaseReplacing means that a newer CSV has been created and the csv's resources will be transitioned to a new owner.
@@ -231,6 +233,7 @@ const (
 	CSVReasonRequirementsMet                             ConditionReason = "AllRequirementsMet"
 	CSVReasonOwnerConflict                               ConditionReason = "OwnerConflict"
 	CSVReasonComponentFailed                             ConditionReason = "InstallComponentFailed"
+	CSVReasonComponentFailedNoRetry						 ConditionReason = "InstallComponentFailedNoRetry"
 	CSVReasonInvalidStrategy                             ConditionReason = "InvalidInstallStrategy"
 	CSVReasonWaiting                                     ConditionReason = "InstallWaiting"
 	CSVReasonInstallSuccessful                           ConditionReason = "InstallSucceeded"

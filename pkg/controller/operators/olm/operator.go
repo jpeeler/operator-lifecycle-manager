@@ -1119,6 +1119,11 @@ func (a *Operator) transitionCSVState(in v1alpha1.ClusterServiceVersion) (out *v
 		"phase":     in.Status.Phase,
 	})
 
+	if in.Status.Phase == v1alpha1.CSVPhaseFailedNoRetry {
+		// seriously, don't retry. will change phase in the event of an intentional requeue
+		return
+	}
+
 	out = in.DeepCopy()
 	now := a.now()
 
@@ -1308,6 +1313,11 @@ func (a *Operator) transitionCSVState(in v1alpha1.ClusterServiceVersion) (out *v
 		}
 
 		if syncError = installer.Install(strategy); syncError != nil {
+			if k8serrors.IsForbidden(syncError) {
+				logger.Infof("Setting CSV to failed without retry due to forbidden error: %v", syncError)
+				out.SetPhaseWithEvent(v1alpha1.CSVPhaseFailed, v1alpha1.CSVReasonComponentFailedNoRetry, fmt.Sprintf("install strategy failed: %s", syncError), now, a.recorder)
+				return
+			}
 			out.SetPhaseWithEvent(v1alpha1.CSVPhaseFailed, v1alpha1.CSVReasonComponentFailed, fmt.Sprintf("install strategy failed: %s", syncError), now, a.recorder)
 			return
 		}
