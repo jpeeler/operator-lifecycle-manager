@@ -679,6 +679,26 @@ func (a *Operator) syncObject(obj interface{}) (syncError error) {
 		a.requeueCSVsByLabelSet(logger, labelSets...)
 	}
 
+	// Requeue CSVs that are in the phase of failed-no-retry in the case of an RBAC change
+	var errs []error
+	related, _ := scoped.IsObjectRBACRelated(metaObj)
+	if related {
+		csvList := a.csvSet(metaObj.GetNamespace(), v1alpha1.CSVPhaseFailedNoRetry)
+		for _, csv := range csvList {
+			csv.SetPhase(v1alpha1.CSVPhasePending, v1alpha1.CSVReasonDetectedClusterChange, "Cluster resources changed state", a.now())
+			_, err := a.client.OperatorsV1alpha1().ClusterServiceVersions(csv.GetNamespace()).UpdateStatus(csv)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if err := a.csvQueueSet.Requeue(csv.GetNamespace(), csv.GetName()); err != nil {
+				errs = append(errs, err)
+			}
+			logger.Debug("Requeuing CSV due to detected RBAC change")
+		}
+	}
+
+	syncError = utilerrors.NewAggregate(errs)
 	return nil
 }
 
