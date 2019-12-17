@@ -171,10 +171,13 @@ func NewOperator(ctx context.Context, kubeconfigPath string, clock utilclock.Clo
 		// Wire InstallPlans
 		ipInformer := crInformerFactory.Operators().V1alpha1().InstallPlans()
 		op.lister.OperatorsV1alpha1().RegisterInstallPlanLister(namespace, ipInformer.Lister())
+		ipQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), fmt.Sprintf("%s/ips", namespace))
+		op.ipQueueSet.Set(namespace, ipQueue)
 		ipQueueInformer, err := queueinformer.NewQueueInformer(
 			ctx,
 			queueinformer.WithMetricsProvider(metrics.NewMetricsInstallPlan(op.client)),
 			queueinformer.WithLogger(op.logger),
+			queueinformer.WithQueue(ipQueue),
 			queueinformer.WithInformer(ipInformer.Informer()),
 			queueinformer.WithSyncer(queueinformer.LegacySyncHandler(op.syncInstallPlans).ToSyncer()),
 		)
@@ -1050,6 +1053,7 @@ func (o *Operator) checkBundleLookups(plan *v1alpha1.InstallPlan) (bool, error) 
 		}
 
 		if bundleLookup.BundleJob.CompletionTime != nil {
+			o.logger.Debug("JPEELER: already processed (checkBundleLookups)")
 			// already processed
 			return true, nil
 		}
@@ -1057,6 +1061,7 @@ func (o *Operator) checkBundleLookups(plan *v1alpha1.InstallPlan) (bool, error) 
 		// TODO: instead of doing a get, should just watch all jobs (add ownerref) and update the installplan from there
 		job, err := o.opClient.KubernetesInterface().BatchV1().Jobs(bundleLookup.BundleJob.Namespace).Get(bundleLookup.BundleJob.Name, metav1.GetOptions{})
 		if err != nil {
+			o.logger.Debugf("JPEELER: job lookup error %v", err)
 			return false, err
 		}
 		if len(job.Status.Conditions) == 0 || len(job.Status.Conditions) > 0 && job.Status.Conditions[0].Type != batchv1.JobComplete {
@@ -1068,12 +1073,14 @@ func (o *Operator) checkBundleLookups(plan *v1alpha1.InstallPlan) (bool, error) 
 
 		configmap, err := o.opClient.KubernetesInterface().CoreV1().ConfigMaps(bundleLookup.ConfigMapRef.Namespace).Get(bundleLookup.ConfigMapRef.Name, metav1.GetOptions{})
 		if err != nil {
+			o.logger.Debugf("JPEELER: configmap lookup error %v", err)
 			return false, err
 		}
 
 		// extract data from configmap and write to install plan
 		bundle, err := o.bundleLoader.Load(configmap)
 		if err != nil {
+			o.logger.Debugf("JPEELER: bundle load error %v", err)
 			return false, err
 		}
 
@@ -1094,8 +1101,10 @@ func (o *Operator) checkBundleLookups(plan *v1alpha1.InstallPlan) (bool, error) 
 	}
 
 	if _, err := o.client.OperatorsV1alpha1().InstallPlans(plan.GetNamespace()).UpdateStatus(plan); err != nil {
+		o.logger.Debugf("JPEELER: failed to update %v", err)
 		return false, err
 	}
+	o.logger.Debugf("JPEELER: status (checkBundleLookups) %v", plan.Status.BundleLookups)
 	return true, nil
 }
 
@@ -1127,7 +1136,13 @@ func (o *Operator) syncInstallPlans(obj interface{}) (syncError error) {
 			return fmt.Errorf("BundleLookups failed: %v", err)
 		}
 		if !finished {
-			o.ipQueueSet.RequeueAfter(plan.GetNamespace(), plan.GetName(), 5*time.Second)
+			err := o.ipQueueSet.RequeueAfter(plan.GetNamespace(), plan.GetName(), 5*time.Second)
+			if err != nil {
+				o.logger.Debugf("JPEELER: FAIL install plan not yet finished, requeueing %v", err)
+				syncError = err
+				return
+			}
+			o.logger.Debug("JPEELER: install plan not yet finished, requeueing ")
 			return
 		}
 	}

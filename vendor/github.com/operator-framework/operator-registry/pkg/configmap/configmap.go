@@ -73,7 +73,12 @@ func loadBundle(entry *logrus.Entry, data map[string]string) (bundle *api.Bundle
 		}
 
 		if resource.GetKind() == v1alpha1.ClusterServiceVersionKind {
-			bundle.CsvJson = content
+			//bundle.CsvJson = content
+			csvBytes, err := resource.MarshalJSON()
+			if err != nil {
+				return nil, nil, err
+			}
+			bundle.CsvJson = string(csvBytes)
 		}
 		bundle.Object = append(bundle.Object, content)
 		logger.Infof("added to bundle, Kind=%s", resource.GetKind())

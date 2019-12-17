@@ -2536,6 +2536,9 @@ func TestInstallPlanFromBundleImage(t *testing.T) {
 	crc := newCRClient(t)
 	catalogSourceName := genName("mock-kiali-")
 
+	// expect to execute in the same namespace OLM is operating in
+	testNamespace := strings.TrimSuffix(testNamespace, "-operator")
+
 	// add RBAC for e2e namespace
 	rbacRole := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
